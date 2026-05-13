@@ -1,0 +1,594 @@
+---
+title: "Analiza Opóźnień Lotniczych"
+author: "Albert Kistowski"
+format: html
+editor: visual
+---
+
+## 
+
+Przygotowanie środowiska
+
+```{r}
+library(tidyverse)
+library(lubridate)
+
+```
+
+```{r}
+weather_df <- read_csv("data/weather_meteo_by_airport.csv")%>%
+  rename(
+    FlightDate = time,       # Zmieniamy 'time' na 'FlightDate'
+    Dep_Airport = airport_id # Zmieniamy 'airport_id' na 'Dep_Airport'
+  ) %>%
+  mutate(FlightDate = ymd(FlightDate))
+```
+
+```{r}
+cols_to_keep <- c("FlightDate", "Dep_Airport", "Dep_Delay", "Airline", "DepTime_label")
+flights_df <- read_csv("data/US_flights_2023.csv", col_select = all_of(cols_to_keep)) %>%
+  mutate(FlightDate = ymd(FlightDate))
+```
+
+```{r}
+print(weather_df)
+print(flights_df)
+```
+
+Integracja i Filtrowanie (Case Study: lotnisko Chicago ORD)
+
+```{r}
+target_airport <- "ORD" # Chicago O'Hare
+data_final <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport == target_airport) %>%
+  drop_na(Dep_Delay, wspd) %>%
+  filter(Dep_Delay > 0)
+
+```
+
+```{r}
+print(paste("Analizowane lotnisko:", target_airport))
+print(paste("Liczba wierszy gotowych do analizy:", nrow(data_final)))
+```
+
+```{r}
+head(data_final)
+```
+
+# Regresja liniowa
+
+```{r}
+library(tidyverse)
+library(broom) 
+
+
+
+#Tworzymy tabelę dla Chicago (ORD)
+df_ord <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport == "ORD") %>%
+  select(Dep_Delay, wspd, pres, tavg, prcp, Dep_Airport)
+
+# 2.Tworzymy tabelę dla Atlanty (ATL)
+df_atl <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport == "ATL") %>%
+  select(Dep_Delay, wspd, pres, tavg, prcp, Dep_Airport)
+
+
+data_total <- bind_rows(df_ord, df_atl) %>%
+  drop_na() %>% 
+  filter(Dep_Delay > 0) 
+
+
+print(paste("Łączna liczba lotów do analizy:", nrow(data_total)))
+```
+
+```{r}
+# Budujemy model: Opóźnienie (Y) zależy od wiatru, ciśnienia, temperatury i opadów (X)
+model_linear <- lm(Dep_Delay ~ wspd + pres + tavg + prcp, data = data_total)
+
+# Wyświetlamy pełne podsumowanie statystyczne
+summary(model_linear)
+
+# Opcjonalnie: Ładna tabelka wyników (pakiet broom)
+tidy(model_linear)
+```
+
+W kolumnie Pr(\>\|t\|) wszędzie masz \<2e-16.
+
+- Wniosek: Wszystkie czynniki pogodowe (wiatr, ciśnienie, temperatura, opady) mają rzeczywisty, nieprzypadkowy wpływ na opóźnienia. Możemy odrzucić hipotezę zerową, że pogoda nie ma znaczenia.
+
+<!-- -->
+
+- wspd (+0.44): Wzrost prędkości wiatru o 1 węzeł zwiększa średnie opóźnienie o 0.44 minuty. (Logiczne: silniejszy wiatr = większe separacje między samolotami).
+
+- prcp (+0.47): Każdy milimetr opadów zwiększa opóźnienie o 0.47 minuty. (Mokry pas, gorsza widoczność).
+
+- pres (-0.34): Wzrost ciśnienia o 1 hPa zmniejsza opóźnienie o 0.34 minuty.
+
+  - Tłumaczenie: Niskie ciśnienie to zazwyczaj niż/burza, wysokie to wyż/słońce. Znak minus potwierdza, że niższe ciśnienie (burza) = większe opóźnienie.
+
+- tavg (+0.40): Wzrost temperatury o 1 stopień zwiększa opóźnienie o 0.40 minuty.Skoro wyższa temperatura zwiększa opóźnienia, to dowód na to, że sezon letni (wakacyjny) generuje większe zatory niż zima.
+
+R\^2 wynosi niespełna 1% Model wyjaśnia około 1% zmienności czasu opóźnienia. Jest to wynik oczekiwany, ponieważ modelujemy tylko czynniki pogodowe. Pozostałe 99% zmienności wynika z czynników operacyjnych, których nie ma w tym modelu (usterki techniczne, rotacja załóg, przepustowość ATC, późny przylot samolotu z innego miasta).
+
+# **REGRESJA LOGISTYCZNA**
+
+```{r}
+# 1. Tworzymy zmienną binarną (0/1)
+data_logistic <- data_total %>%
+  mutate(Is_Delayed_15 = if_else(Dep_Delay >= 15, 1, 0))
+
+model_logit <- glm(Is_Delayed_15 ~ wspd + pres + tavg + prcp, 
+                   data = data_logistic, 
+                   family = binomial)
+summary(model_logit)
+print("Ilorazy Szans (Odds Ratios):")
+exp(coef(model_logit))
+```
+
+1.  Istotność statystyczna Wszystkie zmienne (wspd, pres, tavg, prcp) mają wartość\
+    p \< 2e-16. Oznacza to, że każda z nich ma realny wpływ na to, czy samolot spóźni się powyżej 15 minut.
+
+2.  prcp (Opady) = 1.0164 Każdy dodatkowy 1 mm opadów zwiększa szansę na duże opóźnienie (\>15 min) o 1.64%
+
+3.  tavg (Temperatura) = 1.0127
+
+    Interpretacja: Każdy 1 stopień Celsjusza więcej zwiększa szansę na opóźnienie o 1.27%.
+
+    Wniosek: Ponownie potwierdzasz hipotezę, że sezon letni (wysokie temperatury) sprzyja opóźnieniom (tłok na niebie), bardziej niż zimny.
+
+4.  wspd (Wiatr) = 1.0063
+
+    Interpretacja: Każdy 1 węzeł wiatru więcej zwiększa szansę na opóźnienie o 0.63%.
+
+    Wniosek: Wiatr ma wpływ, ale jednostkowo mniejszy niż deszcz. Dopiero silna wichura (np. 20 węzłów) robi dużą różnicę.
+
+5.  pres (Ciśnienie) = 0.9851
+
+    Interpretacja: Wynik jest poniżej 1.0, co oznacza działanie "ochronne". Każdy wzrost ciśnienia o 1 hPa zmniejsza ryzyko opóźnienia o 1.5%.
+
+    Logika: Wysokie ciśnienie = stabilna pogoda = mniej opóźnień.
+
+# Regresja Poissona
+
+```{r}
+model_poisson <- glm(Dep_Delay ~ wspd + pres + tavg + prcp, 
+                     data = data_total, 
+                     family = poisson)
+summary(model_poisson)
+
+tidy(model_poisson, exponentiate = TRUE)
+```
+
+(Wiatr) = 1.0115
+
+Interpretacja: Wzrost prędkości wiatru o 1 węzeł zwiększa przewidywany czas opóźnienia o 1.15%.
+
+(Temperatura) = 1.0111
+
+Interpretacja: Wzrost temperatury o 1 stopień Celsjusza wydłuża czas opóźnienia o 1.11%.
+
+(Opady) = 1.0095
+
+Interpretacja: Każdy milimetr opadów wydłuża czas opóźnienia o 0.95%.
+
+(Ciśnienie) = 0.9898Interpretacja: Wzrost ciśnienia o 1 hPa skraca czas opóźnienia o ok. 1.02% (1 - 0.9898 = 0.0102).
+
+# MODEL Z EFEKTAMI STAŁYMI
+
+```{r}
+# Pytanie badawcze: 
+# Jaki jest wpływ samego lotniska na opóźnienie (ceteris paribus - przy stałej pogodzie)?
+
+# R automatycznie zamieni zmienną tekstową 'Dep_Airport' na zmienną binarną.
+# Będziemy szukać w wynikach wiersza 'Dep_AirportORD' (lub ATL).
+model_fixed <- lm(Dep_Delay ~ wspd + pres + tavg + prcp + Dep_Airport,data = data_total)
+
+# Wyświetlamy wyniki
+summary(model_fixed)
+
+# Wersja czytelna
+library(broom)
+tidy(model_fixed)
+
+```
+
+Najważniejszy wynik: Dep_AirportORD (+8.35)
+
+Wartość: 8.352Istotność: $p < 2e-16$ .Co to znaczy: Baza to Atlanta (ATL). Zmienna Dep_AirportORD pokazuje różnicę dla Chicago. Model z efektami stałymi wykazał, że przy uwzględnieniu tych samych warunków pogodowych (ceteris paribus), samolot startujący z lotniska w Chicago (ORD) jest średnio o 8.35 minuty bardziej opóźniony niż samolot startujący z Atlanty (ATL).Oznacza to, że za znaczną część opóźnień w Chicago odpowiadają czynniki pozapogodowe, takie jak: infrastruktura, organizacja ruchu lotniczego czy przeciążenie sieci.”
+
+# Model Two-Way Fixed Effects
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(broom)
+
+# 1. Tworzymy tabelę dla Chicago (ORD) - Z FlightDate!
+df_ord <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport == "ORD") %>%
+  select(Dep_Delay, wspd, pres, tavg, prcp, Dep_Airport, FlightDate) # <--- DODANO
+
+# 2. Tworzymy tabelę dla Atlanty (ATL) - Z FlightDate!
+df_atl <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport == "ATL") %>%
+  select(Dep_Delay, wspd, pres, tavg, prcp, Dep_Airport, FlightDate) 
+
+# 3. Łączymy w całość
+data_total <- bind_rows(df_ord, df_atl) %>%
+  drop_na() %>%
+  filter(Dep_Delay > 0)
+
+# 4. Teraz mutate zadziała - tworzymy kolumnę z MIESIĄCEM
+data_total <- data_total %>%
+  mutate(Month = factor(month(FlightDate)))
+
+print("Dane naprawione! Kolumna Month dodana.")
+
+# MODEL 5: MODEL Z EFEKTAMI CZASOWYMI (Time-Fixed Effects)
+# Pytanie: Czy lipiec jest gorszy od marca niezależnie od pogody?
+
+model_time_fe <- lm(Dep_Delay ~ wspd + pres + tavg + prcp + Dep_Airport + Month, 
+                    data = data_total)
+
+print("--- WYNIKI: MODEL Z EFEKTAMI CZASOWYMI ---")
+# Wyświetlamy tylko istotne wiersze, żeby nie zaśmiecać ekranu
+summary(model_time_fe)
+```
+
+Styczeń (Baza): Jest punktem odniesienia (najgorszy lub jeden z najgorszych).
+
+Month7 (Lipiec): Wynik to -1.84, ale wartość Pr(\>\|t\|) wynosi 0.06 (jest powyżej 0.05).
+
+Wniosek: Wynik jest nieistotny statystycznie. Oznacza to, że Lipiec jest tak samo zły jak Styczeń. Nie ma statystycznej różnicy między zimowym szczytem a letnim szczytem wakacyjnym.
+
+Month10 (Październik): Wynik to -14.13 (istotny \*\*\*).
+
+Wniosek: To jest najlepszy miesiąc do latania! W październiku średnie opóźnienie jest o ponad 14 minut mniejsze niż w styczniu (ceteris paribus).
+
+Month9 (Wrzesień) i Month11 (Listopad): Również bardzo silne spadki opóźnień (ok. -10 min względem stycznia).\
+\
+
+Efekt Lotniska (Dep_AirportORD) – Potwierdzenie! Wartość: +8.12
+
+To niemal identyczny wynik jak w poprzednim modelu (+8.35).
+
+Dla Ciebie to świetna wiadomość – Twój model jest stabilny. Dodanie miesięcy nie "zepsuło" głównego wniosku, że Chicago dodaje średnio 8 minut opóźnienia względem Atlanty.
+
+Pogoda (tavg, prcp, wspd) Zwróć uwagę na temperaturę (tavg):
+
+Współczynnik wynosi +0.46.
+
+Jest to ciekawe, bo model uwzględnia już miesiące. Oznacza to, że nawet w obrębie tego samego miesiąca (np. w lipcu), gorętsze dni są gorsze niż chłodniejsze dni lipca. To potwierdza problem "przegrzania" systemu latem.
+
+# Las Losowy, losowy las decyzyjny
+
+```{r}
+library(randomForest)
+library(tidyverse)
+
+set.seed(123) # Żeby wyniki były powtarzalne
+
+# 1. Losujemy próbkę danych (10 000 lotów), żeby komputer nie liczył tego godzinę
+# To jest właśnie element "losowania próbki", o który pytałeś!
+data_sample <- data_total %>%
+  sample_n(10000)
+
+# 2. Budujemy Las Losowy
+# Model spróbuje przewidzieć opóźnienie na podstawie pogody i lotniska
+rf_model <- randomForest(Dep_Delay ~ wspd + pres + tavg + prcp + Dep_Airport,
+                         data = data_sample,
+                         ntree = 100,      
+                         importance = TRUE) 
+
+
+print(rf_model)
+
+varImpPlot(rf_model, 
+           main = "Ranking Ważności Czynników (Random Forest)",
+           col = "blue",
+           pch = 19)
+```
+
+\
+
+Analiza Wykresu (Ranking Ważności) Lewy wykres (%IncMSE - Wzrost Błędu Średniokwadratowego):
+
+Mówi nam: "O ile pogorszy się nasz model, jeśli usuniemy tę zmienną?".
+
+Wynik: Najważniejszym czynnikiem okazuje się Ciśnienie (pres), a zaraz za nim Opady (prcp).
+
+Lotnisko (Dep_Airport) jest na 3. miejscu – to znaczy, że lokalizacja jest ważna, ale najpierw model patrzy na to, czy jest niż (burza) i czy pada deszcz.
+
+Wiatr (wspd) jest na samym dole! To genialnie potwierdza Twój poprzedni model z efektami stałymi, gdzie wiatr przestał być istotny statystycznie. Las Losowy "zgadza się" z tamtym modelem: wiatr sam w sobie nie jest tak kluczowy jak deszcz czy ciśnienie.
+
+Prawy wykres (IncNodePurity):
+
+Mówi o "czystości podziału". Ten wykres faworyzuje zmienne ciągłe o dużej liczbie unikalnych wartości (dlatego temperatura tavg jest na górze).
+
+Wynik % Var explained: 2.98 (w tekście pod wykresem):
+
+Model wyjaśnia ok. 3% zmienności. To bardzo podobny wynik do Twoich regresji liniowych (tam było R² \~1.5%).
+
+Wniosek Metody uczenia maszynowego potwierdzają, że czynniki pogodowe odpowiadają za kilka procent opóźnień. Reszta to czynniki operacyjne, których nie ma w danych.
+
+\
+\
+\
+
+```{r}
+#Historiogram opóźnień
+ggplot(data_final, aes(x = Dep_Delay)) +
+  geom_histogram(binwidth = 10, fill = "skyblue", color = "black") +
+  xlim(0, 300) + # Damy widok do 300 minut aby wykres był bardziej czytelny
+  labs(title = "Rozkład opóźnień na lotnisku Chicago ORD",
+       x = "Minuty opóźnienia", y = "Liczba lotów") +
+  theme_minimal()
+```
+
+```{r}
+#Tworzymy macierz korelacji aby sprawdzić czy pogoda wpływa na opóźnienia 
+num_data <- data_final %>%
+  select(Dep_Delay, wspd, pres, tavg, prcp, snow)
+cor_matrix <- cor(num_data)
+print(round(cor_matrix, 2))
+```
+
+Minimalna korelacja z opadami i wiatrem, skorzystamy z klastrowania które wyłowi specyficzne grupy lotów.
+
+```{r}
+dane_do_klastrowania <- data_final %>%
+  select(Dep_Delay, wspd, tavg, pres, prcp, snow)
+data_scaled <- scale(dane_do_klastrowania) # Standaryzacja
+print("Podgląd danych po standaryzacji:")
+head(data_scaled)
+```
+
+```{r}
+set.seed(123)
+wss <- sapply(1:8, function(k) {
+  kmeans(data_scaled, centers = k, nstart = 10, iter.max = 20)$tot.withinss
+})
+```
+
+```{r}
+plot(1:8, wss, type = "b", pch = 19, frame = FALSE, 
+     xlab = "Liczba klastrów (K)",
+     ylab = "Całkowita wewnątrz-grupowa suma kwadratów",
+     main = "Metoda Łokcia (Elbow Method) dla Chicago ORD",
+     col = "blue")
+grid()
+```
+
+Gwałtowny spadek pomiędzy K=1 a K=3
+
+Punkt załamania K=4
+
+Bierzemy k=4 grup
+
+```{r}
+set.seed(123)
+final_kmeans <- kmeans(data_scaled, centers = 4, nstart = 25)
+data_final$Cluster <- as.factor(final_kmeans$cluster)
+```
+
+```{r}
+cluster_summary <- data_final %>%
+  group_by(Cluster) %>%
+  summarise(
+    Liczba_Lotow = n(),
+    Srednie_Opoznienie = round(mean(Dep_Delay), 2),
+    Sredni_Wiatr = round(mean(wspd), 2),
+    Srednia_Temp = round(mean(tavg), 2),
+    Sredni_Snieg = round(mean(snow), 2),
+    Srednie_Cisnienie = round(mean(pres), 2)
+  )
+print(cluster_summary)
+```
+
+```{r}
+ggplot(data_final, aes(x = Cluster, y = Dep_Delay, fill = Cluster)) +
+  geom_boxplot() +
+  ylim(0, 300) + # Ograniczamy widok, żeby było czytelnie
+  labs(
+    title = "Charakterystyka Klastrów Opóźnień (Chicago ORD)",
+    subtitle = "Rozkład opóźnień w wyodrębnionych grupach",
+    x = "Numer Klastra",
+    y = "Opóźnienie (minuty)"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+# Weryfikacja liczebności klastrów
+weryfikacja <- cluster_summary %>%
+  select(Cluster, Liczba_Lotow) %>%
+  mutate(
+    Suma_Calkowita = sum(Liczba_Lotow),
+    Udzial_Procentowy = round((Liczba_Lotow / Suma_Calkowita) * 100, 2)
+  )
+
+print(weryfikacja)
+
+# Sprawdzenie czy suma się zgadza
+print(paste("Suma lotów w klastrach:", sum(cluster_summary$Liczba_Lotow)))
+print(paste("Suma lotów w bazie danych:", nrow(data_final)))
+```
+
+- Klaster 4 (Dominujący - "Sezon Letni"):
+
+  - Liczebność: To największa grupa (aż 45 tys. lotów, czyli prawie połowa ruchu!).
+
+  - Warunki: Ciepło (21°C), słaby wiatr, brak śniegu. Idealna pogoda.
+
+  - Opóźnienie: Ok. 41 minut.
+
+  - Wniosek: To dowód na to, że najwięcej opóźnień generuje sam ruch lotniczy (sezon wakacyjny), a nie pogoda. Mimo świetnych warunków, system jest przeciążony.
+
+- Klaster 3 (Wietrzny / Burzowy):
+
+  - Liczebność: 13 831 lotów (spora grupa).
+
+  - Warunki: Najsilniejszy wiatr (20.8 węzłów) i najniższe ciśnienie (1006 hPa).
+
+  - Opóźnienie: 65 minut (Najwyższe w zestawieniu!).
+
+  - Wniosek: To jest grupa, w której pogoda faktycznie psuje rozkład. Silny wiatr i niskie ciśnienie (fronty atmosferyczne) wydłużają opóźnienia średnio o 25 minut względem normy.
+
+- Klaster 1 (Zima / Śnieg):
+
+  - Liczebność: Najmniejsza grupa (5 795 lotów) – śnieg w Chicago nie pada codziennie.
+
+  - Warunki: Mróz i śnieg.
+
+  - Opóźnienie: Ok. 40 minut.
+
+  - Wniosek: opóźnienia w śnieżycy (40 min) są zbliżone do opóźnień w ładny dzień przy dużym ruchu (Klaster 4 - 41 min). To świadczy o bardzo dobrej organizacji służb zimowych na lotnisku ORD.
+
+- Klaster 2 (Spokojny Standard):
+
+  - Warunki: Umiarkowana temperatura, średni wiatr.
+
+  - Opóźnienie: \~30 minut. To jest Twoja "linia bazowa" (najmniejsze możliwe opóźnienie w analizowanym zbiorze).
+
+```{r}
+pca_result <- prcomp(data_scaled, center = FALSE, scale. = FALSE)
+
+pca_data <- data.frame(
+  PC1 = pca_result$x[, 1],
+  PC2 = pca_result$x[, 2],
+  Cluster = as.factor(data_final$Cluster)
+)
+```
+
+```{r}
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(alpha = 0.6, size = 1.5) + 
+  stat_ellipse(level = 0.95, color = "black", linetype = "dashed", size = 0.5) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Wizualizacja Klastrów Opóźnień (Chicago ORD)",
+    subtitle = "Metoda PCA: Rzut wielowymiarowych danych na 2D",
+    x = "Wymiar 1 (Pogoda/Warunki)",
+    y = "Wymiar 2 (Specyfika Opóźnienia)",
+    color = "Grupa (Klaster)",
+    caption = "Źródło: Opracowanie własne"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+Widać tutaj silną separacje pomiędzy czerwonym (Zima) a zielonym (Lato). Warunki operacyjne są inne niż latem.
+
+W przypadku Chicago obserwujemy dużą wariancję i wyraźną separację grup. Oznacza to, że zima jest na tyle silnym czynnikiem, że matematycznie tworzy zupełnie osobny stan operacyjny lotniska.
+
+Przeanalizuje teraz lotnisko w Atlancie "ATL"
+
+```{r}
+target_airport_2 <- "ATL"
+
+data_final_atl <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport == target_airport_2) %>%
+  drop_na(Dep_Delay, wspd,tavg, pres, prcp, snow) %>%
+  filter(Dep_Delay > 0)
+```
+
+```{r}
+print(paste("Analizowane lotnisko:", target_airport_2))
+print(paste("Liczba lotów dla Atlanty:", nrow(data_final_atl)))
+print("Liczba braków danych (NA) w kolumnach:")
+colSums(is.na(data_final_atl %>% select(Dep_Delay, wspd, tavg, pres, prcp, snow)))
+```
+
+```{r}
+sds <- apply(data_final_atl %>% select(Dep_Delay, wspd, tavg, pres, prcp, snow), 2, sd)
+print("Odchylenia standardowe:")
+print(sds)
+```
+
+Odchylenie standardowe w kolumnie snow jest zerowe, więc śniej jest stały (zawsze 0) więc musimy ominąć go przy wyborze kolumn do klastrowania
+
+```{r}
+dane_do_klastrowania_atl <- data_final_atl %>%
+  select(Dep_Delay, wspd, tavg, pres, prcp)
+
+data_scaled_atl <- scale(dane_do_klastrowania_atl)
+
+set.seed(123)
+
+wss_atl <- sapply(1:8, function(k) {
+  kmeans(data_scaled_atl, centers = k, nstart = 10, iter.max = 20)$tot.withinss
+})
+
+
+plot(1:8, wss_atl, type = "b", pch = 19, frame = FALSE, 
+     xlab = "Liczba klastrów (K)",
+     ylab = "WSS",
+     main = "Metoda Łokcia dla Atlanty (ATL)",
+     col = "red") 
+grid()
+```
+
+Załamanie jest przy K=3 i K=5, ale wybierzemy K=3, ponieważ Atlanta ma prostszy klimat (brak śniegu) niż Chicago które było wcześniej analizowane
+
+```{r}
+set.seed(123)
+kmeans_atl <- kmeans(data_scaled_atl, centers = 3, nstart = 25)
+data_final_atl$Cluster <- as.factor(kmeans_atl$cluster)
+
+cluster_summary_atl <- data_final_atl %>%
+  group_by(Cluster) %>%
+  summarise(
+    Liczba_Lotow = n(),
+    Srednie_Opoznienie = round(mean(Dep_Delay), 2),
+    Sredni_Wiatr = round(mean(wspd), 2),
+    Srednia_Temp = round(mean(tavg), 2),
+    Srednie_Cisnienie = round(mean(pres), 2),
+    Srednie_Opady = round(mean(prcp), 2)
+  )
+```
+
+```{r}
+weryfikacja_atl <- cluster_summary_atl %>%
+  mutate(Udzial_Procentowy = round((Liczba_Lotow / sum(Liczba_Lotow)) * 100, 2))
+
+print(as.data.frame(weryfikacja_atl))
+```
+
+```{r}
+pca_atl <- prcomp(data_scaled_atl, center = FALSE, scale. = FALSE)
+
+
+pca_data_atl <- data.frame(
+  PC1 = pca_atl$x[, 1],
+  PC2 = pca_atl$x[, 2],
+  Cluster = as.factor(data_final_atl$Cluster)
+)
+
+# wykres
+ggplot(pca_data_atl, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(alpha = 0.6, size = 1.5) + 
+  stat_ellipse(level = 0.95, color = "black", linetype = "dashed", size = 0.5) +
+  scale_color_brewer(palette = "Dark2") + 
+  labs(
+    title = "Wizualizacja Klastrów Opóźnień - Atlanta (ATL)",
+    subtitle = "Analiza porównawcza: Struktura 3-grupowa",
+    x = "Wymiar 1 (PC1)",
+    y = "Wymiar 2 (PC2)",
+    color = "Grupa (Klaster)",
+    caption = "Źródło: Opracowanie własne"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+Punkty z różnych grup (Burze, Upał, Standard) mieszają się ze sobą. Nie ma wyraźnej granicy, gdzie kończy się "zwykły dzień", a zaczyna "dzień burzowy".
+
+wykres PCA pokazuje strukturę bardziej zwartą i ciągłą. Grupy nakładają się na siebie, co sugeruje, że przejścia między warunkami pogodowymi są płynne, a specyfika opóźnień jest bardziej jednolita przez cały rok.

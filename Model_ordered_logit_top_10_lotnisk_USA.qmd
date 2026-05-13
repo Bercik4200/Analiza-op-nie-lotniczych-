@@ -1,0 +1,165 @@
+---
+title: "Model ordered logit - 10 lotnisk"
+author: "Albert Kistowski"
+format: html
+editor: visual
+---
+
+## Przygotowanie środowiska
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(broom)
+library(randomForest)
+library(nnet)
+library(caret)
+```
+
+```{r}
+weather_df <- read_csv("data/weather_meteo_by_airport.csv")%>%
+  rename(
+    FlightDate = time,       # Zmieniamy 'time' na 'FlightDate'
+    Dep_Airport = airport_id # Zmieniamy 'airport_id' na 'Dep_Airport'
+  ) %>%
+  mutate(FlightDate = ymd(FlightDate))
+```
+
+```{r}
+cols_to_keep <- c("FlightDate", "Dep_Airport", "Dep_Delay", "Airline", "DepTime_label")
+flights_df <- read_csv("data/US_flights_2023.csv", col_select = all_of(cols_to_keep)) %>%
+  mutate(FlightDate = ymd(FlightDate))
+head(flights_df)
+head(weather_df)
+```
+
+```{r}
+# 1. Definiujemy wektor 10 największych lotnisk w USA (kody IATA)
+top10_airports <- c("ATL", "DFW", "DEN", "ORD", "LAX", "JFK", "LAS", "MCO", "MIA", "CLT")
+
+```
+
+Łączymy Dane
+
+```{r}
+# Łączymy surowe dane dla obu lotnisk, zachowując potrzebne kolumny
+data_class_full <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport %in% top10_airports ) %>% 
+  drop_na(Dep_Delay, wspd, pres, tavg, prcp, Airline, DepTime_label) %>%
+  filter(Dep_Delay > 0) %>%
+  mutate(
+    # Tworzymy 3 grupy opóźnień
+    Delay_Group = case_when(
+      Dep_Delay <= 15 ~ "1_Male (0-15m)",
+      Dep_Delay > 15 & Dep_Delay <= 45 ~ "2_Srednie (16-45m)",
+      Dep_Delay > 45 ~ "3_Duze (>45m)"
+    ),
+    # Ustawiamy jako faktory (wymóg modeli klasyfikacyjnych)
+    Delay_Group = factor(Delay_Group, levels = c("1_Male (0-15m)", "2_Srednie (16-45m)", "3_Duze (>45m)")),
+    Month = factor(month(FlightDate)),
+    Airline = factor(Airline),
+    DepTime_label = factor(DepTime_label),
+    Dep_Airport = factor(Dep_Airport)
+  )
+
+print(paste("Liczba wierszy:", nrow(data_class_full)))
+```
+
+# Model Ordered Logit
+
+```{r}
+library(dplyr)
+library(MASS)
+library(pscl)
+
+data_class_full <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport %in% top10_airports ) %>% 
+  drop_na(Dep_Delay, wspd, pres, tavg, prcp, Airline, DepTime_label) %>%
+  filter(Dep_Delay > 0) %>%
+  mutate(
+    Delay_Group = case_when(
+      Dep_Delay <= 15 ~ "1_Male (0-15m)",
+      Dep_Delay > 15 & Dep_Delay <= 45 ~ "2_Srednie (16-45m)",
+      Dep_Delay > 45 ~ "3_Duze (>45m)"
+    ),
+    Delay_Group = factor(Delay_Group, levels = c("1_Male (0-15m)", "2_Srednie (16-45m)", "3_Duze (>45m)")),
+    Month = factor(month(FlightDate)),
+    Airline = factor(Airline),
+    DepTime_label = factor(DepTime_label),
+    Dep_Airport = factor(Dep_Airport)
+  )
+
+# USTAWIAMY ATLANTĘ (ATL) JAKO LOTNISKO BAZOWE DO PORÓWNAŃ
+data_class_full$Dep_Airport <- relevel(data_class_full$Dep_Airport, ref = "ATL")
+
+print(paste("Liczba wierszy:", nrow(data_class_full)))
+
+# --- POPRAWIONY MODEL m4 (plus zamiast gwiazdki) ---
+data_class_full <- data_class_full %>%
+  mutate(
+    Delay_Group_ord = factor(Delay_Group, 
+                             levels = c("1_Male (0-15m)", "2_Srednie (16-45m)", "3_Duze (>45m)"), 
+                             ordered = TRUE)
+  )
+
+m1 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp, data = data_class_full, Hess = TRUE)
+m2 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp + Dep_Airport, data = data_class_full, Hess = TRUE)
+m3 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp + Dep_Airport + Month + DepTime_label, data = data_class_full, Hess = TRUE)
+m4 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp + Dep_Airport + Month + DepTime_label + Airline, data = data_class_full, Hess = TRUE)
+
+
+# Porównanie kryterium AIC
+print("Porównanie modeli (Kryterium AIC)")
+print(AIC(m1, m2, m3, m4))
+
+# Pseudo R-kwadrat dla najlepszego modelu (McFadden)
+print("Pseudo R-kwadrat")
+pR2(m4)
+
+# Ilorazy Szans dla docelowego, pełnego modelu
+print("Ilorazy Szans (Odds Ratios) dla Pełnego Modelu")
+round(exp(coef(m4)), 3)
+```
+
+Eksport wyników do tabel
+
+```{r}
+# 1. EKSPORT TABELI AIC
+# Tworzymy ładną ramkę danych z wynikami AIC i zapisujemy
+tabela_aic <- AIC(m1, m2, m3, m4) %>%
+  rownames_to_column(var = "Nazwa_Modelu") %>%
+  rename(Wartosc_AIC = AIC) %>%
+  # Poprawiamy nazwy modeli dla czytelności
+  mutate(Nazwa_Modelu = c("m1: Sama pogoda", "m2: + Lotniska", "m3: + Miesiąc i Pora", "m4: Pełny (+Linie)"))
+
+write_csv(tabela_aic, "Zestawienie_Kryterium_AIC.csv")
+print("Zapisano plik: Zestawienie_Kryterium_AIC.csv")
+
+# 2. EKSPORT WYNIKÓW MODELU m4 (Ilorazy Szans, p-value, przedziały ufności)
+# Funkcja polr w R domyślnie nie podaje p-value, musimy je wyliczyć z rozkładu normalnego
+
+wyniki_m4 <- tidy(m4, conf.int = TRUE) %>%
+  # Obliczamy P-value na podstawie statystyki t
+  mutate(
+    P_value = 2 * pnorm(abs(statistic), lower.tail = FALSE),
+    # Liczymy Ilorazy Szans (Odds Ratios) poprzez potęgowanie (exp)
+    Iloraz_Szans_OR = exp(estimate),
+    CI_Dolne_95_OR = exp(conf.low),
+    CI_Gorne_95_OR = exp(conf.high)
+  ) %>%
+  # Wybieramy tylko te kolumny, które wkleisz do pracy dyplomowej
+  dplyr::select(term, estimate, Iloraz_Szans_OR, CI_Dolne_95_OR, CI_Gorne_95_OR, P_value) %>%
+  rename(
+    Zmienna = term, 
+    Wspolczynnik_Logit = estimate
+  ) %>%
+  # Formatyzujemy p-value, żeby ładnie wyglądało (<0.001)
+  mutate(
+    P_value_opis = ifelse(P_value < 0.001, "<0.001", round(P_value, 3))
+  )
+
+write_csv(wyniki_m4, "Tabela_Wynikow_Model_Ordered_Logit_10_lotnisk.csv")
+print("Zapisano plik: Tabela_Wynikow_Model_Ordered_Logit_10_lotnisk.csv")
+```

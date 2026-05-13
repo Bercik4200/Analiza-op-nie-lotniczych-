@@ -1,0 +1,865 @@
+---
+title: "Modele"
+author: "Albert Kistowski"
+format: html
+editor: visual
+---
+
+## Przygotowanie środowiska
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(broom)
+library(randomForest)
+library(nnet)
+library(caret)
+```
+
+```{r}
+weather_df <- read_csv("data/weather_meteo_by_airport.csv")%>%
+  rename(
+    FlightDate = time,       # Zmieniamy 'time' na 'FlightDate'
+    Dep_Airport = airport_id # Zmieniamy 'airport_id' na 'Dep_Airport'
+  ) %>%
+  mutate(FlightDate = ymd(FlightDate))
+```
+
+```{r}
+cols_to_keep <- c("FlightDate", "Dep_Airport", "Dep_Delay", "Airline", "DepTime_label")
+flights_df <- read_csv("data/US_flights_2023.csv", col_select = all_of(cols_to_keep)) %>%
+  mutate(FlightDate = ymd(FlightDate))
+head(flights_df)
+head(weather_df)
+```
+
+```{r}
+
+# 1. Tworzymy tabelę dla Chicago (ORD)
+df_ord <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport == "ORD") %>%
+  dplyr::select(Dep_Delay, wspd, pres, tavg, prcp, Dep_Airport) # Dodano dplyr::
+
+# 2. Tworzymy tabelę dla Atlanty (ATL)
+df_atl <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport == "ATL") %>%
+  dplyr::select(Dep_Delay, wspd, pres, tavg, prcp, Dep_Airport) # Dodano dplyr::
+
+# 3. Łączymy w jedną bazę
+data_total <- bind_rows(df_ord, df_atl) %>%
+  drop_na() %>% 
+  filter(Dep_Delay > 0) 
+
+print(paste("Łączna liczba lotów do analizy:", nrow(data_total)))
+```
+
+```{r}
+# 1. Kategoryzacja danych (Podział opóźnień na 3 grupy)
+data_class <- data_total %>%
+  mutate(
+    Delay_Group = case_when(
+      Dep_Delay <= 15 ~ "1_Male (0-15m)",
+      Dep_Delay > 15 & Dep_Delay <= 45 ~ "2_Srednie (16-45m)",
+      Dep_Delay > 45 ~ "3_Duze (>45m)"
+    )
+  ) %>%
+  # Zamieniamy na faktor (wymóg dla modeli klasyfikacyjnych)
+  mutate(Delay_Group = factor(Delay_Group, levels = c("1_Male (0-15m)", "2_Srednie (16-45m)", "3_Duze (>45m)"))) %>%
+  # Tworzymy też zmienną binarną dla zwykłej regresji logistycznej
+  mutate(Is_Delayed_15 = factor(ifelse(Dep_Delay > 15, "Tak", "Nie"), levels = c("Nie", "Tak")))
+
+print(table(data_class$Delay_Group))
+```
+
+Binarna regresja logistyczna.\
+Czy opóźnienie przekroczy 15 minut ?
+
+```{r}
+model_logit <- glm(Is_Delayed_15 ~ wspd + pres + tavg + prcp + Dep_Airport, 
+                   data = data_class, 
+                   family = binomial)
+
+summary(model_logit)
+
+# Ilorazy Szans (Odds Ratios)
+print("--- Ilorazy Szans (Odds Ratios) ---")
+exp(coef(model_logit))
+```
+
+Wynik ods ratio 1.093 (wysoko statystycznie). Lot startujący z Chicago ma o 9,3% większe prawdopobieństwo przekroczenia 15' opóźnienia niż ten sam lot z Atlanty.
+
+Wiatr p = 0.0507 na granicy błędu statystycznego. Model uznał że wiatr jest nieistotny statystycznie. Reszte czynniki pogdowe są bezbłędne. Każdy milimetr deszczu zwiększa ryzyko 15' opóźnienia o 1,6%, temperatura 1,3%, wzrost ciśnienia o 1hPa zmiejsza opóźnienie o 1,6% +.
+
+Wielomianowa regresja logistyczna
+
+Trzy klasy opóźnień, za bazę odniesienia posłużą mi małe opóźnienia
+
+```{r}
+model_multinom <- multinom(Delay_Group ~ wspd + pres + tavg + prcp + Dep_Airport, 
+                           data = data_class)
+summary(model_multinom)
+print("--- Ilorazy Szans (Wielomianowe) ---")
+exp(coef(model_multinom))
+```
+
+# Model wielomianowy
+
+```{r}
+
+
+library(tidyverse)
+library(lubridate)
+library(nnet)
+
+# Łączymy surowe dane dla obu lotnisk, zachowując potrzebne kolumny
+data_class_full <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport %in% c("ORD", "ATL")) %>% 
+  drop_na(Dep_Delay, wspd, pres, tavg, prcp, Airline, DepTime_label) %>%
+  filter(Dep_Delay > 0) %>%
+  mutate(
+    # Tworzymy 3 grupy opóźnień
+    Delay_Group = case_when(
+      Dep_Delay <= 15 ~ "1_Male (0-15m)",
+      Dep_Delay > 15 & Dep_Delay <= 45 ~ "2_Srednie (16-45m)",
+      Dep_Delay > 45 ~ "3_Duze (>45m)"
+    ),
+    # Ustawiamy jako faktory (wymóg modeli klasyfikacyjnych)
+    Delay_Group = factor(Delay_Group, levels = c("1_Male (0-15m)", "2_Srednie (16-45m)", "3_Duze (>45m)")),
+    Month = factor(month(FlightDate)),
+    Airline = factor(Airline),
+    DepTime_label = factor(DepTime_label),
+    Dep_Airport = factor(Dep_Airport)
+  )
+
+print(paste("Liczba wierszy:", nrow(data_class_full)))
+
+
+model_multinom_rozbudowany <- multinom(Delay_Group ~ wspd + pres + tavg + prcp * Dep_Airport + Airline + DepTime_label + Month, 
+                                       data = data_class_full, 
+                                       maxit = 500)
+
+print("Ilorazy Szans (Odds Ratios)")
+wyniki_szans <- exp(coef(model_multinom_rozbudowany))
+
+round(wyniki_szans, 3)
+```
+
+Chicago, przejście do grupy średniego opóźnienia spada o 7,3% a przejście do grupy dużego opóźnienia rośnie do 16,7% porównując z Atlantą
+
+Pory dnia : Rano szansa na duże opóźnienie jest niższe o 27,5% względem popołudnia, a szansa na duże opóźnienie wieczorem rośnie do 29%
+
+Miesiące: styczeń jest bazą
+
+w lipcu szansa na duże opóźnienie jest równa 16% - szczyt wakacyjny, w październiku szansa na duże opóźnienie spada o ponad połowę, o 51,3%
+
+Pogoda:
+
+Każdy milimetr deszczu zwiększa szanse na duże opóźnienie o 2,7%
+
+Linie lotnicze:
+
+Frontier Arlines 161% większą szanse na opóźnienia\
+Jetblue airways 105% większa szansa na opóźnienia\
+Southwest airlines o 24% mniejsza szansa na opóźnienia
+
+Wybór lini lotniczej ma większy wpływ na opóźnienie niż pogoda.
+
+Eksport wyników do pliku CSV:
+
+```{r}
+# 1. Pobieramy podsumowanie modelu (zawiera współczynniki i błędy standardowe)
+podsumowanie <- summary(model_multinom_rozbudowany)
+
+# 2. Wyciągamy macierze wartości
+coefs <- podsumowanie$coefficients
+ses <- podsumowanie$standard.errors
+
+# 3. Ręczne obliczanie Z-value oraz P-value
+z_values <- coefs / ses
+p_values <- (1 - pnorm(abs(z_values), 0, 1)) * 2
+
+# 4. Obliczanie Ilorazów Szans (OR) i 95% Przedziałów Ufności (Wald CIs)
+or <- exp(coefs)
+ci_dolne <- exp(coefs - 1.96 * ses)
+ci_gorne <- exp(coefs + 1.96 * ses)
+
+# 5. Tworzymy pustą tabelę, do której wrzucimy wyniki dla obu grup
+tabela_wielomianowa <- data.frame()
+
+kategorie <- rownames(coefs) # "2_Srednie (16-45m)" oraz "3_Duze (>45m)"
+zmienne <- colnames(coefs)
+
+# 6. Pętla, która przekształca macierz w elegancką tabelę (Long format)
+for (kat in kategorie) {
+  temp_df <- data.frame(
+    Porownanie_Do_Bazy_Male = kat,
+    Zmienna = zmienne,
+    Wspolczynnik_Logit = as.numeric(coefs[kat, ]),
+    Iloraz_Szans_OR = as.numeric(or[kat, ]),
+    CI_Dolne_95_OR = as.numeric(ci_dolne[kat, ]),
+    CI_Gorne_95_OR = as.numeric(ci_gorne[kat, ]),
+    P_value = as.numeric(p_values[kat, ])
+  )
+  # Doklejamy wiersze do głównej tabeli
+  tabela_wielomianowa <- rbind(tabela_wielomianowa, temp_df)
+}
+
+# 7. Formatowanie kosmetyczne
+# Zaokrąglamy liczby do 3 miejsc po przecinku
+tabela_wielomianowa[, 3:6] <- round(tabela_wielomianowa[, 3:6], 3)
+
+# Ładny zapis P-value
+tabela_wielomianowa$P_value_opis <- ifelse(tabela_wielomianowa$P_value < 0.001, "<0.001", round(tabela_wielomianowa$P_value, 3))
+
+# Usuwamy surowe P-value z widoku, żeby tabela była czystsza (opcjonalnie)
+tabela_wielomianowa <- tabela_wielomianowa[, c(1, 2, 3, 4, 5, 6, 8)]
+colnames(tabela_wielomianowa)[7] <- "P_value"
+
+# 8. Zapis do pliku CSV
+write.csv(tabela_wielomianowa, "Tabela_Wynikow_Model_Wielomianowy.csv", row.names = FALSE)
+
+print("Gotowe! Tabela dla modelu wielomianowego została wygenerowana i zapisana.")
+```
+
+Las losowy (podstawowy model)
+
+```{r}
+set.seed(123)
+# Losujemy 10 000 wierszy do przetestowania
+data_sample <- data_class %>% sample_n(10000)
+
+rf_classifier <- randomForest(Delay_Group ~ wspd + pres + tavg + prcp + Dep_Airport,
+                              data = data_sample,
+                              ntree = 100, 
+                              importance = TRUE)
+
+
+print(rf_classifier)
+
+
+varImpPlot(rf_classifier, 
+           main = "Ranking Zmiennych - Klasyfikator Random Forest",
+           col = "darkred",
+           pch = 19)
+```
+
+# Model las losowy
+
+```{r}
+set.seed(123)
+data_sample_rozbudowany <- data_class_full %>% sample_n(10000)
+
+
+# Budujemy model uwzględniający pogodę, lotnisko ORAZ czynniki operacyjne
+rf_classifier_rozbudowany <- randomForest(Delay_Group ~ wspd + pres + tavg + prcp + Dep_Airport + Airline + DepTime_label + Month,
+                                          data = data_sample_rozbudowany,
+                                          ntree = 100, 
+                                          importance = TRUE)
+
+# 1. Wyświetlamy nową macierz pomyłek i błąd OOB
+print(rf_classifier_rozbudowany)
+
+# 2. Rysujemy zaktualizowany wykres ważności zmiennych
+varImpPlot(rf_classifier_rozbudowany, 
+           main = "Rozbudowany Ranking Ważności Czynników",
+           col = "darkgreen",
+           pch = 19)
+```
+
+```         
+ OOB estimate of  error rate: 53.07% to daje nam dowód na wysoką losowość.
+```
+
+Rozbudowany zbiór danych meterologicznych i operacyjnych nie wystarcza do bezbłędnego przypisania lotu do konkretnego przedziału czasowego.
+
+Decydująca rola czynników operacyjnych. Porównując podstawowy model z rozbudowanym modelem lasu losującego (dodając więcej zmiennych) widzimy wzrost zdolności algorytmu do poprawnego wykrywania średnich opóźnień. Warunki pogodowe mają wpływ na opóźnienia, ale harmonogram przewoźnika i przepustowość infrastuktury decydują o tym czy będzie opóźnienie \> 45'.
+
+Eksport do pliku CSV\
+
+```{r}
+# 1. Wyciągamy macierz ważności z zapisanego modelu
+# Używamy do tego wbudowanej funkcji importance()
+waznosc_zmiennych <- importance(rf_classifier_rozbudowany)
+
+# 2. Przekształcamy to w klasyczną, wygodną ramkę danych
+tabela_las_losowy <- data.frame(
+  Zmienna = rownames(waznosc_zmiennych),
+  waznosc_zmiennych
+)
+
+# 3. Sortujemy tabelę od najważniejszej do najmniej ważnej zmiennej
+# Używamy do tego kolumny MeanDecreaseGini (najlepsza miara ważności)
+tabela_las_losowy <- tabela_las_losowy[order(-tabela_las_losowy$MeanDecreaseGini), ]
+
+# 4. Kosmetyka - zaokrąglamy wyniki do 3 miejsc po przecinku
+tabela_las_losowy[, 2:ncol(tabela_las_losowy)] <- round(tabela_las_losowy[, 2:ncol(tabela_las_losowy)], 3)
+
+# Wyświetlamy w konsoli, żebyś widział co wyszło
+print(tabela_las_losowy)
+
+# 5. Zapisujemy jako plik CSV
+write.csv(tabela_las_losowy, "Tabela_Wynikow_Las_Losowy_Waznosc.csv", row.names = FALSE)
+
+print("Gotowe! Tabela ważności dla Lasu Losowego została zapisana na dysku.")
+```
+
+# Model Ordered Logit
+
+```{r}
+library(dplyr)
+library(MASS)
+library(pscl)
+
+data_class_full <- data_class_full %>%
+  mutate(
+    Delay_Group_ord = factor(Delay_Group, 
+                             levels = c("1_Male (0-15m)", "2_Srednie (16-45m)", "3_Duze (>45m)"), 
+                             ordered = TRUE)
+  )
+
+# Budowa bloków
+
+# BLOK 1: Sama pogoda (Baza)
+m1 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp, 
+           data = data_class_full, Hess = TRUE)
+
+# BLOK 2: Pogoda + Infrastruktura (Lotnisko)
+m2 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp + Dep_Airport, 
+           data = data_class_full, Hess = TRUE)
+
+# BLOK 3: Pogoda + Lotnisko + Zmienne Czasowe (Miesiąc, Pora dnia)
+m3 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp + Dep_Airport + Month + DepTime_label, 
+           data = data_class_full, Hess = TRUE)
+
+# BLOK 4: Pełny model (Dodajemy Przewoźników i interakcję deszczu z lotniskiem)
+m4 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp * Dep_Airport + Month + DepTime_label + Airline, 
+           data = data_class_full, Hess = TRUE)
+
+
+# Porównanie kryterium AIC
+print("Porównanie modeli (Kryterium AIC)")
+print(AIC(m1, m2, m3, m4))
+
+# Pseudo R-kwadrat dla najlepszego modelu (McFadden)
+print("Pseudo R-kwadrat")
+pR2(m4)
+
+# Ilorazy Szans dla docelowego, pełnego modelu
+print("Ilorazy Szans (Odds Ratios) dla Pełnego Modelu")
+round(exp(coef(m4)), 3)
+```
+
+df AIC m1 6 464224.2 m2 7 463948.6 m3 21 460031.0 m4 34 456735.7\
+Blok 4 (pogoda + pora dnia + miesiąc + przewoźnik) ma najlepszą zdolność predykcyjną modelu
+
+Wylot z Chicago zwiększa na znalezienie się w gorszej strefie opóźnienia o 7,7%.
+
+Loty poranne mają o 23.2% mniejszą szansę na wpadnięcie do gorszej kategorii, a loty wieczorne mają tę szansę większą aż o 21.6%.
+
+Każdy milimetr deszczu zwiększa pogorszenie kategorii opóźnienia o 1,9%
+
+Interakcja deszczu z lotniskiem Chicago radzi sobie lepiej o 0,9% niż lotnisko w Atlancie
+
+Miesiące: lipiec ma najgorszy współczynnik. Ryzyko wpadnięcia w gorszą grupę wynosi 15,6% a w październiku jest mniejsze ryzyko o 39,8%
+
+Przewoźnicy: Linie Frontier mają aż 147% większą szansę na wylądowanie w gorszej kategorii opóźnienia, Jetblue to ponad 118% większą szansę, a Delta ma o 2,2 % mniejszą szansę oraz Southwest mają 16,1 % mniejszą szansę
+
+Eksport modelu do pliku CSV\
+
+```{r}
+# 1. Wyciągamy podsumowanie (wszystkie wiersze, w tym punkty odcięcia)
+podsumowanie_m4 <- coef(summary(m4))
+
+# 2. Obliczamy p-value ze statystyki t
+p_values_m4 <- pnorm(abs(podsumowanie_m4[, "t value"]), lower.tail = FALSE) * 2
+
+# 3. Ręczne wyliczanie przedziałów ufności (Wald CI)
+# Zapewnia to zgodność wierszy i działa błyskawicznie na pełnej bazie
+z_value <- 1.96 
+ci_dolne_logit <- podsumowanie_m4[, "Value"] - z_value * podsumowanie_m4[, "Std. Error"]
+ci_gorne_logit <- podsumowanie_m4[, "Value"] + z_value * podsumowanie_m4[, "Std. Error"]
+
+# 4. Składamy to w jedną, elegancką tabelę
+tabela_m4 <- data.frame(
+  Zmienna = rownames(podsumowanie_m4),
+  Wspolczynnik_Logit = podsumowanie_m4[, "Value"],
+  Iloraz_Szans_OR = exp(podsumowanie_m4[, "Value"]),
+  CI_Dolne_95_OR = exp(ci_dolne_logit),
+  CI_Gorne_95_OR = exp(ci_gorne_logit),
+  P_value = p_values_m4
+)
+
+# 5. Kosmetyka i zaokrąglanie do 3 miejsc po przecinku
+tabela_m4[, 2:6] <- round(tabela_m4[, 2:6], 3)
+
+# Ładnie sformatowane p-value (np. zamiast 0.000 będzie "<0.001")
+tabela_m4$P_value_opis <- ifelse(tabela_m4$P_value < 0.001, "<0.001", as.character(tabela_m4$P_value))
+
+# Aby tabela była czytelniejsza, możemy podmienić kolumnę P_value
+tabela_m4 <- tabela_m4[, c("Zmienna", "Wspolczynnik_Logit", "Iloraz_Szans_OR", "CI_Dolne_95_OR", "CI_Gorne_95_OR", "P_value_opis")]
+colnames(tabela_m4)[6] <- "P_value"
+
+# 6. Zapisujemy jako plik CSV gotowy do Excela
+write.csv(tabela_m4, "Tabela_Wynikow_Model_Ordered_Logit_Pelny.csv", row.names = FALSE)
+
+print("Gotowe! Tabela z wynikami Ordered Logit została zapisana na dysku.")
+```
+
+```{r}
+# Wczytanie biblioteki (na wszelki wypadek)
+library(dplyr)
+
+# 1. Tworzymy czystą tabelę do wysłania
+dane_do_wyslania <- data_class_full %>%
+  dplyr::select(
+    # Zmienne identyfikacyjne (opcjonalnie, żeby było widać co to za lot)
+    Dep_Airport, 
+    Airline,
+    
+    # === TWOJE DANE CIĄGŁE ===
+    Dep_Delay,       
+    
+    # === TWOJE DANE KATEGORYZOWANE ===
+    Delay_Group_ord, 
+    
+    # Zmienne pogodowe (ciągłe)
+    wspd, pres, tavg, prcp
+  )
+
+# 2. Zapisujemy tabelę do pliku CSV 
+# Plik pojawi się w Twoim folderze roboczym (Working Directory)
+write.csv(dane_do_wyslania, "Dane_Opoznienia_Cigle_i_Kategorie.csv", row.names = FALSE)
+
+print("Plik CSV został pomyślnie wygenerowany i jest gotowy do wysłania!")
+```
+
+```{r}
+# =========================================================
+# EKSPORT WYNIKÓW MODELU ORDERED LOGIT (Poprawiony)
+# =========================================================
+
+print("Tworzę pełną tabelę wyników...")
+
+# 1. Wyciągamy podsumowanie (wszystkie 34 wiersze)
+ctable <- coef(summary(m4))
+
+# 2. Obliczamy p-value (wartość p)
+p_values <- pnorm(abs(ctable[, "t value"]), lower.tail = FALSE) * 2
+
+# 3. RĘCZNE OBLICZANIE PRZEDZIAŁÓW UFNOŚCI (WALD CI)
+# Zapewni to idealną zgodność wierszy (34 do 34)
+z_value <- 1.96 # Stała dla poziomu ufności 95%
+ci_dolne_logit <- ctable[, "Value"] - z_value * ctable[, "Std. Error"]
+ci_gorne_logit <- ctable[, "Value"] + z_value * ctable[, "Std. Error"]
+
+# 4. Składamy to w jedną, elegancką tabelę
+tabela_modelu <- data.frame(
+  Zmienna = rownames(ctable),
+  Wspolczynnik_Logit = ctable[, "Value"],
+  Iloraz_Szans_OR = exp(ctable[, "Value"]),
+  CI_Dolne_95_OR = exp(ci_dolne_logit),
+  CI_Gorne_95_OR = exp(ci_gorne_logit),
+  P_value = p_values
+)
+
+# 5. Zaokrąglamy kolumny numeryczne (od 2 do 6) do 3 miejsc po przecinku
+tabela_modelu[, 2:6] <- round(tabela_modelu[, 2:6], 3)
+
+# 6. Dodajemy ładnie sformatowane p-value (np. zamiast 0.000 będzie "<0.001")
+tabela_modelu$P_value_opis <- ifelse(tabela_modelu$P_value < 0.001, "<0.001", as.character(tabela_modelu$P_value))
+
+# Zapisujemy do Excela (CSV)
+write.csv(tabela_modelu, "Tabela_Wynikow_Model_m4_Poprawiona.csv", row.names = FALSE)
+
+print("Gotowe! Tabela z wynikami (34 wiersze) została bezpiecznie zapisana na dysku.")
+```
+
+```{r}
+# Wczytanie biblioteki
+library(dplyr)
+
+print("Rozpoczynam losowanie 10% próbki danych...")
+
+# Ustawienie "ziarna" losowania, aby próbka zawsze była identyczna (powtarzalna)
+set.seed(123)
+
+# Losowanie dokładnie 10% wierszy z Twojej głównej bazy (data_class_full)
+probka_10_procent <- data_class_full %>%
+  slice_sample(prop = 0.10)
+
+# Sprawdzenie, ile wierszy wylosowano
+ilosc_wierszy <- nrow(probka_10_procent)
+print(paste("Wylosowano dokładnie:", ilosc_wierszy, "wierszy."))
+
+# Zapisanie próbki do pliku CSV
+write.csv(probka_10_procent, "Probka_Danych_10_Procent.csv", row.names = FALSE)
+
+print("Gotowe! Plik z 10-procentową próbką został zapisany na dysku.")
+```
+
+Model Orderd Logit z próbki 10%
+
+```{r}
+library(dplyr)
+library(MASS)
+
+dane_probka <- read.csv("Probka_Danych_10_Procent.csv")
+
+dane_probka <- dane_probka %>%
+  mutate(
+    Delay_Group_ord = factor(Delay_Group_ord, 
+                             levels = c("1_Male (0-15m)", "2_Srednie (16-45m)", "3_Duze (>45m)"), 
+                             ordered = TRUE)
+  )
+
+
+model_probka <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp * Dep_Airport + 
+                         Month + DepTime_label + Airline, 
+                       data = dane_probka, 
+                       Hess = TRUE)
+
+print("Podsumowanie Modelu")
+summary(model_probka)
+
+print("Ilorazy Szans (OR) i 95% Przedziały Ufności")
+
+wspolczynniki <- coef(summary(model_promotor))
+z_value <- 1.96 
+
+ci_dolne <- exp(wspolczynniki[, "Value"] - z_value * wspolczynniki[, "Std. Error"])
+ci_gorne <- exp(wspolczynniki[, "Value"] + z_value * wspolczynniki[, "Std. Error"])
+ilorazy_szans <- exp(wspolczynniki[, "Value"])
+
+tabela <- data.frame(
+  OR = round(ilorazy_szans, 3),
+  CI_Dolne = round(ci_dolne, 3),
+  CI_Gorne = round(ci_gorne, 3)
+)
+
+print(tabela)
+```
+
+INTERPRETACJA
+
+Efekt domina w ciągu dnia: Czas odlotu okazuje się najsilniejszym czynnikiem wpływającym na ryzyko opóźnień. Loty wieczorem mają aż o 17% większe prawdopodobieństwo trafienia do kategorii z poważniejszymi opóźnieniami, jeśli porównać je z tymi wykonywanymi w środku dnia. Z kolei wyloty rano zdają się działać nieco stabilizująco – zmniejszają to ryzyko niemal o 28%.
+
+Znaczenie przewoźnika: Wybór linii lotniczej ma naprawdę spory wpływ na to, czy lot będzie punktualny. Na przykład podróżowanie liniami Frontier wiąże się z ryzykiem poważniejszego opóźnienia większym o około 89%. Natomiast tradycyjni, duzi przewoźnicy, jak Delta czy Southwest, potrafią ten wskaźnik dość skutecznie zredukować – odpowiednio o 20% i 26%.
+
+Rola pogody: Warunki atmosferyczne odgrywają rolę, choć jednak nie tak dramatyczną jak czynniki operacyjne. Każde dodatkowe milimetry deszczu zwiększają prawdopodobieństwo opóźnienia tylko o około 1,7%, a wzrost temperatury o stopień skutkuje wzrostem o 1,4%. Nie jest to więc mało ważne, ale też nie jest głównym sprawcą.
+
+Zmiana znaczenia na mniejszej próbce: Co ciekawe, w analizie opartej na zaledwie 10% danych wiatr, lotnisko w Chicago i interakcja deszczu z tym portem straciły statystyczną istotność – ich przedziały ufności objęły wartość 1,0.
+
+Model w tabelce 10% danych\
+
+```{r}
+# =========================================================
+# EKSPORT TABELI WYNIKÓW DLA MODELU Z PRÓBKI 10%
+# =========================================================
+
+print("Tworzę pełną tabelę wyników dla próbki 10%...")
+
+# 1. Wyciągamy podsumowanie z modelu promotora (wszystkie wiersze)
+# Zakładamy, że model nazywa się 'model_promotor' (tak jak w poprzednim skrypcie)
+ctable_probka <- coef(summary(model_promotor))
+
+# 2. Obliczamy p-value (wartość p)
+p_values_probka <- pnorm(abs(ctable_probka[, "t value"]), lower.tail = FALSE) * 2
+
+# 3. Ręczne wyliczanie przedziałów ufności (Wald CI) 
+# Zapewnia idealne dopasowanie wszystkich wierszy
+z_value <- 1.96 
+ci_dolne_logit_probka <- ctable_probka[, "Value"] - z_value * ctable_probka[, "Std. Error"]
+ci_gorne_logit_probka <- ctable_probka[, "Value"] + z_value * ctable_probka[, "Std. Error"]
+
+# 4. Składamy to w jedną, elegancką tabelę
+tabela_probka <- data.frame(
+  Zmienna = rownames(ctable_probka),
+  Wspolczynnik_Logit = ctable_probka[, "Value"],
+  Iloraz_Szans_OR = exp(ctable_probka[, "Value"]),
+  CI_Dolne_95_OR = exp(ci_dolne_logit_probka),
+  CI_Gorne_95_OR = exp(ci_gorne_logit_probka),
+  P_value = p_values_probka
+)
+
+
+tabela_probka[, 2:6] <- round(tabela_probka[, 2:6], 3)
+
+tabela_probka$P_value_opis <- ifelse(tabela_probka$P_value < 0.001, "<0.001", as.character(tabela_probka$P_value))
+
+write.csv(tabela_probka, "Tabela_Wynikow_Model_Probka_10.csv", row.names = FALSE)
+
+print("Gotowe")
+```
+
+# Statystyka opisowa
+
+```{r}
+# =========================================================
+# STATYSTYKA OPISOWA: OPÓŹNIENIA I POGODA (Tabele do pracy)
+# =========================================================
+library(dplyr)
+
+print("Generuję statystyki opisowe dla opóźnień...")
+
+# 1. Statystyki opóźnień z podziałem na lotniska
+stat_lotniska <- data_class_full %>%
+  group_by(Dep_Airport) %>%
+  summarise(
+    Liczba_Lotow = n(),
+    Srednia_Minut = mean(Dep_Delay, na.rm = TRUE),
+    Mediana_Minut = median(Dep_Delay, na.rm = TRUE),
+    Odchylenie_Std = sd(Dep_Delay, na.rm = TRUE),
+    Minimum = min(Dep_Delay, na.rm = TRUE),
+    Maksimum = max(Dep_Delay, na.rm = TRUE)
+  )
+
+# 2. Statystyki opóźnień dla CAŁEJ BAZY (wiersz podsumowujący)
+stat_ogolem <- data_class_full %>%
+  summarise(
+    Dep_Airport = "OGÓŁEM (Wszystkie)",
+    Liczba_Lotow = n(),
+    Srednia_Minut = mean(Dep_Delay, na.rm = TRUE),
+    Mediana_Minut = median(Dep_Delay, na.rm = TRUE),
+    Odchylenie_Std = sd(Dep_Delay, na.rm = TRUE),
+    Minimum = min(Dep_Delay, na.rm = TRUE),
+    Maksimum = max(Dep_Delay, na.rm = TRUE)
+  )
+
+# 3. Łączymy w jedną tabelę i zaokrąglamy do 2 miejsc po przecinku
+tabela_opoznienia <- bind_rows(stat_ogolem, stat_lotniska) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+write.csv(tabela_opoznienia, "Statystyki_Opisowe_Opoznienia.csv", row.names = FALSE)
+
+
+print("Generuję statystyki opisowe dla pogody...")
+
+# 4. Statystyki pogodowe z podziałem na porty lotnicze
+tabela_pogoda <- data_class_full %>%
+  group_by(Dep_Airport) %>%
+  summarise(
+    Temp_Srednia = mean(tavg, na.rm = TRUE),
+    Temp_Min = min(tavg, na.rm = TRUE),
+    Temp_Max = max(tavg, na.rm = TRUE),
+    
+    Wiatr_Sredni = mean(wspd, na.rm = TRUE),
+    Wiatr_Max = max(wspd, na.rm = TRUE),
+    
+    Opad_Sredni = mean(prcp, na.rm = TRUE),
+    Opad_Max = max(prcp, na.rm = TRUE),
+    
+    Cisnienie_Srednie = mean(pres, na.rm = TRUE)
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+write.csv(tabela_pogoda, "Statystyki_Opisowe_Pogoda.csv", row.names = FALSE)
+
+print("Gotowe! Wygenerowano dwa pliki CSV ze statystykami opisowymi.")
+```
+
+# Robustness Check
+
+```{r}
+
+print("Liczenie modelu regresji liniowej (Robustness Check)...")
+
+# 1. Budowa modelu regresji liniowej na danych ciągłych (Dep_Delay w minutach)
+model_ols <- lm(Dep_Delay ~ wspd + pres + tavg + prcp * Dep_Airport + 
+                  Month + DepTime_label + Airline, 
+                data = data_class_full)
+
+# 2. Wyciągamy podsumowanie modelu
+podsumowanie_ols <- summary(model_ols)
+
+# 3. Tworzymy elegancką tabelę z wynikami
+tabela_ols <- data.frame(
+  Zmienna = rownames(podsumowanie_ols$coefficients),
+  Wspolczynnik_Minuty = round(podsumowanie_ols$coefficients[, "Estimate"], 3),
+  Blad_Standardowy = round(podsumowanie_ols$coefficients[, "Std. Error"], 3),
+  T_value = round(podsumowanie_ols$coefficients[, "t value"], 3),
+  P_value = podsumowanie_ols$coefficients[, "Pr(>|t|)"]
+)
+
+# 4. Ładne formatowanie P-value
+tabela_ols$P_value_opis <- ifelse(tabela_ols$P_value < 0.001, "<0.001", as.character(round(tabela_ols$P_value, 3)))
+tabela_ols <- tabela_ols[, c("Zmienna", "Wspolczynnik_Minuty", "Blad_Standardowy", "T_value", "P_value_opis")]
+
+# 5. Zapis do pliku
+write.csv(tabela_ols, "Tabela_Wynikow_Robustness_Check_OLS.csv", row.names = FALSE)
+
+print("Gotowe! Tabela z wynikami Robustness Check została zapisana.")
+```
+
+# Porównanie Modeli
+
+Robusntess Check vs Logity vs Las Losowy
+
+```{r}
+library(dplyr)
+library(MASS)
+library(nnet)
+library(randomForest)
+print("Rozpoczynam generowanie predykcji. To może chwilę potrwać (zwłaszcza Las Losowy)...")
+
+# 1. Zdefiniowanie wektora prawdziwych wartości
+rzeczywiste <- data_class_full$Delay_Group_ord
+
+# 2. Wyciąganie predykcji z modeli klasyfikacyjnych
+pred_ol    <- predict(m4, newdata = data_class_full, type = "class")
+pred_multi <- predict(model_multinom_rozbudowany, newdata = data_class_full)
+pred_rf    <- predict(rf_classifier_rozbudowany, newdata = data_class_full)
+
+# 3. Transformacja predykcji modelu OLS (z ciągłych minut na szufladki)
+pred_ols_minuty <- predict(model_ols, newdata = data_class_full)
+
+pred_ols_kategorie <- case_when(
+  pred_ols_minuty <= 15 ~ "1_Male (0-15m)",
+  pred_ols_minuty > 15 & pred_ols_minuty <= 45 ~ "2_Srednie (16-45m)",
+  pred_ols_minuty > 45 ~ "3_Duze (>45m)"
+)
+
+# Nadanie poziomów (faktorów)
+pred_ols <- factor(pred_ols_kategorie, levels = levels(rzeczywiste))
+
+# 4. NASZA WŁASNA FUNKCJA DO METRYK (Zastępuje pakiet caret!)
+wylicz_metryki_recznie <- function(predykcje, prawdziwe) {
+  # Upewnienie się, że poziomy są identyczne
+  predykcje <- factor(predykcje, levels = levels(prawdziwe))
+  
+  # Klasyczna Macierz Pomyłek z wbudowanej funkcji table()
+  cm <- table(Predykcje = predykcje, Rzeczywiste = prawdziwe)
+  
+  # Wyliczenie ogólnej dokładności (Accuracy) - suma przekątnej / suma wszystkiego
+  acc <- sum(diag(cm)) / sum(cm)
+  
+  # Ręczne wyliczenie Macro F1-Score
+  f1_scores <- numeric(nrow(cm))
+  
+  for(i in 1:nrow(cm)) {
+    TP <- cm[i, i] # True Positives
+    FP <- sum(cm[i, ]) - TP # False Positives
+    FN <- sum(cm[, i]) - TP # False Negatives
+    
+    # Precyzja i Czułość (zabezpieczenie przed dzieleniem przez zero)
+    precision <- ifelse((TP + FP) == 0, 0, TP / (TP + FP))
+    recall    <- ifelse((TP + FN) == 0, 0, TP / (TP + FN))
+    
+    # F1 dla konkretnej klasy
+    f1_scores[i] <- ifelse((precision + recall) == 0, 0, 2 * (precision * recall) / (precision + recall))
+  }
+  
+  # Średnia F1 dla wszystkich 3 klas (Macro F1)
+  macro_f1 <- mean(f1_scores)
+  
+  return(c(Accuracy = as.numeric(acc), F1_Score = as.numeric(macro_f1)))
+}
+
+print("Obliczanie Macierzy Pomyłek i metryk końcowych...")
+
+# 5. Wyliczenie wyników dla każdego modelu naszą nową funkcją
+wyniki_ol    <- wylicz_metryki_recznie(pred_ol, rzeczywiste)
+wyniki_multi <- wylicz_metryki_recznie(pred_multi, rzeczywiste)
+wyniki_rf    <- wylicz_metryki_recznie(pred_rf, rzeczywiste)
+wyniki_ols   <- wylicz_metryki_recznie(pred_ols, rzeczywiste)
+
+# 6. Budowa ostatecznej, eleganckiej tabeli
+tabela_porownawcza <- data.frame(
+  Model = c("Ordered Logit (Docelowy)", "Multinomial Logit", "Las Losowy (ML)", "Regresja OLS (Zkategoryzowana)"),
+  Accuracy_Procent = c(wyniki_ol[1], wyniki_multi[1], wyniki_rf[1], wyniki_ols[1]) * 100,
+  Macro_F1_Score = c(wyniki_ol[2], wyniki_multi[2], wyniki_rf[2], wyniki_ols[2])
+)
+
+# Zaokrąglanie wyników
+tabela_porownawcza$Accuracy_Procent <- round(tabela_porownawcza$Accuracy_Procent, 2)
+tabela_porownawcza$Macro_F1_Score <- round(tabela_porownawcza$Macro_F1_Score, 3)
+
+# Wyświetlenie w konsoli
+print("--- OSTATECZNE PORÓWNANIE MODELI ---")
+print(tabela_porownawcza)
+
+# 7. Zapis do pliku CSV
+write.csv(tabela_porownawcza, "Porownanie_Modeli_Acc_F1_Naprawione.csv", row.names = FALSE)
+
+print("Gotowe! Tabela podsumowująca starcie modeli została pomyślnie wygenerowana bez zewnętrznych pakietów.")
+```
+
+**Ordered Logit :** Osiągnął on wyniki niemal identyczne z modelem wielomianowym (Accuracy ok. 49.1%, F1-Score ok. 0.30). Potwierdza to, że zastosowanie hierarchii opóźnień nie obniża jakości predykcji, a pozwala na znacznie bardziej przejrzystą interpretację zjawiska.
+
+**Przewaga uczenia maszynowego przy anomaliach:** Las Losowy odnotował nieco niższą trafność ogólną (47.92%), ale zdecydowanie najwyższy wskaźnik Macro F1-Score (0.407). Oznacza to, że modele logitowe "grają bezpiecznie" przypisując loty do najczęstszej grupy, podczas gdy Las Losowy znacznie skuteczniej wyłapuje te rzadsze, ale najbardziej dotkliwe "Średnie" i "Duże" zatory.
+
+**Weryfikacja metodologiczna (Regresja OLS):** Klasyczna regresja liniowa poradziła sobie najsłabiej (Accuracy 31%, najniższy F1-Score). Stanowi to bardzo wyraźny dowód (*robustness check*), że ze względu na silną asymetrię danych lotniczych, zwykła regresja jest niewystarczająca i użycie modeli logitowych było krokiem koniecznym.
+
+# Kryterium AIC
+
+```{r}
+# Tworzymy tabelę z wynikami AIC dla każdego kroku budowy modelu
+tabela_aic <- data.frame(
+  Nazwa_Modelu = c(
+    "m1: Blok Baza (Sama pogoda)", 
+    "m2: Blok Infrastruktura (+Lotnisko)", 
+    "m3: Blok Czasowy (+Miesiąc, Pora dnia)", 
+    "m4: Model Pełny Ordered Logit (+Linie lotnicze)",
+    "Model Wielomianowy (Multinomial)"
+  ),
+  Wartosc_AIC = c(
+    AIC(m1), 
+    AIC(m2), 
+    AIC(m3), 
+    AIC(m4), 
+    AIC(model_multinom_rozbudowany)
+  )
+)
+
+# Sortujemy opcjonalnie, choć budowa blokowa naturalnie idzie w dół
+tabela_aic$Wartosc_AIC <- round(tabela_aic$Wartosc_AIC, 1)
+
+print(tabela_aic)
+
+write.csv(tabela_aic, "Zestawienie_Kryterium_AIC.csv", row.names = FALSE)
+print("Gotowe! Tabela AIC została zapisana.")
+```
+
+# Macierz pomyłek
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+print("Generowanie wizualizacji Macierzy Pomyłek dla modelu m4...")
+
+# 1. Obliczamy macierz pomyłek 
+macierz_m4 <- table(Rzeczywiste = rzeczywiste, Predykcje = pred_ol)
+
+# 2. Przekształcamy macierz na format ramki danych
+macierz_df <- as.data.frame(macierz_m4)
+
+# 3. Tworzymy elegancki wykres
+wykres_macierzy <- ggplot(data = macierz_df, aes(x = Predykcje, y = Rzeczywiste, fill = Freq)) +
+  geom_tile(color = "white", size = 0.5) +
+  geom_text(aes(label = Freq), vjust = 0.5, size = 5, color = "black", fontface = "bold") +
+  scale_fill_gradient(low = "#f7fbff", high = "#08519c", name = "Liczba lotów") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Macierz Pomyłek - Docelowy Model Uporządkowanego Logitu (m4)",
+    x = "Kategoria przewidywana przez model",
+    y = "Kategoria rzeczywista (zaobserwowana)"
+  ) +
+  theme(
+    # TUTAJ JEST POPRAWKA: Wymuszamy użycie margin() z pakietu ggplot2
+    plot.title = element_text(face = "bold", hjust = 0.5, margin = ggplot2::margin(b = 15)),
+    axis.text.x = element_text(angle = 15, hjust = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# 4. Zapisujemy jako obrazek w wysokiej rozdzielczości
+ggsave("Rycina_Macierz_Pomylek_m4.png", plot = wykres_macierzy, width = 9, height = 7, dpi = 300)
+
+print("Gotowe! Rycina zapisała się pomyślnie.")
+```
+
+![Imbalanced Data\
+W lotnictwie ogromna większość lotów jest punktualna lub opóźniona tylko odrobinę. Ordered Logit, oparty na sztywnym prawdopodobieństwie, wyliczył sobie, że matematycznie najbardziej "opłaca mu się" stawiać prawie zawsze na to, że opóźnienie będzie małe, bo statystycznie ma wtedy największą szansę na trafienie. Kategoria "Średnie" okazała się dla niego zbyt wąskim przedziałem, by ryzykować strzał.](images/clipboard-942320003.png)

@@ -1,0 +1,5 @@
+Nazwa_Modelu,df,Wartosc_AIC
+m1: Sama pogoda,6,1867123.4768884399
+m2: + Lotniska,15,1864154.2493989514
+m3: + Miesiac i Pora,29,1840601.1595867868
+m4: Pelny (+Linie),43,1829329.413365011

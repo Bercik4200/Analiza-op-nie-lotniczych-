@@ -132,18 +132,22 @@ tabela_aic <- AIC(m1, m2, m3, m4) %>%
   rownames_to_column(var = "Nazwa_Modelu") %>%
   rename(Wartosc_AIC = AIC) %>%
   # Poprawiamy nazwy modeli dla czytelności
-  mutate(Nazwa_Modelu = c("m1: Sama pogoda", "m2: + Lotniska", "m3: + Miesiąc i Pora", "m4: Pełny (+Linie)"))
+  mutate(Nazwa_Modelu = c("m1: Sama pogoda", "m2: + Lotniska", "m3: + Miesiac i Pora", "m4: Pelny (+Linie)"))
 
 write_csv(tabela_aic, "Zestawienie_Kryterium_AIC.csv")
 print("Zapisano plik: Zestawienie_Kryterium_AIC.csv")
 
 # 2. EKSPORT WYNIKÓW MODELU m4 (Ilorazy Szans, p-value, przedziały ufności)
-# Funkcja polr w R domyślnie nie podaje p-value, musimy je wyliczyć z rozkładu normalnego
-
-wyniki_m4 <- tidy(m4, conf.int = TRUE) %>%
-  # Obliczamy P-value na podstawie statystyki t
+# Używamy tidy bez conf.int, aby ominąć wielogodzinne profilowanie modelu
+wyniki_m4 <- tidy(m4) %>%
+  # Obliczamy P-value na podstawie statystyki t oraz błyskawiczne przedziały Walda
   mutate(
     P_value = 2 * pnorm(abs(statistic), lower.tail = FALSE),
+    
+    # Ręczne przedziały ufności logitu (Estimate +/- 1.96 * Standard Error)
+    conf.low = estimate - 1.96 * std.error,
+    conf.high = estimate + 1.96 * std.error,
+    
     # Liczymy Ilorazy Szans (Odds Ratios) poprzez potęgowanie (exp)
     Iloraz_Szans_OR = exp(estimate),
     CI_Dolne_95_OR = exp(conf.low),

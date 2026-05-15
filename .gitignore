@@ -50,3 +50,13 @@ rsconnect/
 .positai
 
 data/
+
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.synctex.gz
+*.fls
+*.fdb_latexmk

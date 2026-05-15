@@ -1,0 +1,121 @@
+---
+title: "Analiza_50_lotnisk"
+format: html
+
+---
+
+Przygotowanie środowiska
+```{r}
+library(tidyverse)
+library(lubridate)
+library(broom)
+library(randomForest)
+library(nnet)
+library(caret)
+library(dplyr)
+library(MASS)
+library(pscl)
+```
+
+Dane pogodowe
+```{r}
+weather_df <- read_csv("data/weather_meteo_by_airport.csv")%>%
+  rename(
+    FlightDate = time,       # Zmieniamy 'time' na 'FlightDate'
+    Dep_Airport = airport_id # Zmieniamy 'airport_id' na 'Dep_Airport'
+  ) %>%
+  mutate(FlightDate = ymd(FlightDate))
+```
+
+Dane lotnicze
+```{r}
+cols_to_keep <- c("FlightDate", "Dep_Airport", "Dep_Delay", "Airline", "DepTime_label")
+flights_df <- read_csv("data/US_flights_2023.csv", col_select = all_of(cols_to_keep)) %>%
+  mutate(FlightDate = ymd(FlightDate))
+head(flights_df)
+head(weather_df)
+```
+
+50 Lotnisk (1 lotnisko na 1 stan w USA)
+```{r}
+airports_50_states <- c(
+  "BHM", "ANC", "PHX", "LIT", "LAX", "DEN", "BDL", "ILG", "MIA", "ATL",
+  "HNL", "BOI", "ORD", "IND", "DSM", "ICT", "CVG", "MSY", "PWM", "BWI",
+  "BOS", "DTW", "MSP", "JAN", "STL", "BZN", "OMA", "LAS", "MHT", "EWR",
+  "ABQ", "JFK", "CLT", "FAR", "CLE", "OKC", "PDX", "PHL", "PVD", "CHS",
+  "FSD", "BNA", "DFW", "SLC", "BTV", "IAD", "SEA", "CRW", "MKE", "JAC" 
+)
+```
+
+Łącznie i przygotowanie danych. Ustawienie Atlanty jako punktu odniesienia
+```{r}
+data_class_full <- flights_df %>%
+  inner_join(weather_df, by = c("FlightDate", "Dep_Airport")) %>%
+  filter(Dep_Airport %in% airports_50_states) %>% 
+  drop_na(Dep_Delay, wspd, pres, tavg, prcp, Airline, DepTime_label) %>%
+  filter(Dep_Delay > 0) %>%
+  mutate(
+    Delay_Group = case_when(
+      Dep_Delay <= 15 ~ "1_Male (0-15m)",
+      Dep_Delay > 15 & Dep_Delay <= 45 ~ "2_Srednie (16-45m)",
+      Dep_Delay > 45 ~ "3_Duze (>45m)"
+    ),
+    Delay_Group_ord = factor(Delay_Group, 
+                             levels = c("1_Male (0-15m)", "2_Srednie (16-45m)", "3_Duze (>45m)"), 
+                             ordered = TRUE),
+    Month = factor(month(FlightDate)),
+    Airline = factor(Airline),
+    DepTime_label = factor(DepTime_label),
+    Dep_Airport = factor(Dep_Airport)
+  )
+
+# Ustawienie ATL (Atlanta) jako punktu odniesienia
+data_class_full$Dep_Airport <- relevel(data_class_full$Dep_Airport, ref = "ATL")
+
+print(paste("Liczba wierszy dla 50 lotnisk:", nrow(data_class_full)))
+```
+Model Ordered Logit
+```{r}
+# BLOK 1: Pogoda
+m1 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp, data = data_class_full, Hess = TRUE)
+
+# BLOK 2: Pogoda + 50 Lotnisk
+m2 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp + Dep_Airport, data = data_class_full, Hess = TRUE)
+
+# BLOK 3: Pogoda + 50 Lotnisk + Czas
+m3 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp + Dep_Airport + Month + DepTime_label, data = data_class_full, Hess = TRUE)
+
+# BLOK 4: Pełny model
+m4 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp + Dep_Airport + Month + DepTime_label + Airline, data = data_class_full, Hess = TRUE)
+
+# Porównanie kryterium AIC
+print("Porównanie modeli (Kryterium AIC)")
+print(AIC(m1, m2, m3, m4))
+```
+```{r}
+# 1. Tabela AIC
+tabela_aic <- AIC(m1, m2, m3, m4) %>%
+  rownames_to_column(var = "Nazwa_Modelu") %>%
+  rename(Wartosc_AIC = AIC) %>%
+  mutate(Nazwa_Modelu = c("m1: Sama pogoda", "m2: + 50 Lotnisk", "m3: + Miesiac i Pora", "m4: Pelny (+Linie)"))
+
+write_csv(tabela_aic, "Zestawienie_Kryterium_AIC_50_lotnisk.csv")
+
+# 2. Pełne wyniki modelu m4
+wyniki_m4 <- tidy(m4) %>%
+  mutate(
+    P_value = 2 * pnorm(abs(statistic), lower.tail = FALSE),
+    conf.low = estimate - 1.96 * std.error,
+    conf.high = estimate + 1.96 * std.error,
+    Iloraz_Szans_OR = exp(estimate),
+    CI_Dolne_95_OR = exp(conf.low),
+    CI_Gorne_95_OR = exp(conf.high)
+  ) %>%
+  dplyr::select(term, estimate, Iloraz_Szans_OR, CI_Dolne_95_OR, CI_Gorne_95_OR, P_value) %>%
+  rename(Zmienna = term, Wspolczynnik_Logit = estimate) %>%
+  mutate(P_value_opis = ifelse(P_value < 0.001, "<0.001", round(P_value, 3)))
+
+write_csv(wyniki_m4, "Tabela_Wynikow_Model_Ordered_Logit_50_lotnisk.csv")
+print("Zakończono eksport wyników dla 50 lotnisk.")
+```
+

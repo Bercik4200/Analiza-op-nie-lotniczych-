@@ -66,7 +66,16 @@ data_class_full <- flights_df %>%
     Month = factor(month(FlightDate)),
     Airline = factor(Airline),
     DepTime_label = factor(DepTime_label),
-    Dep_Airport = factor(Dep_Airport)
+    Dep_Airport = factor(Dep_Airport),
+    
+    # TRANSFORMACJA: Zmiana stopni wiatru na kierunki geograficzne (Faktor)
+    wdir_cat = case_when(
+      wdir >= 315 | wdir < 45 ~ "Polnoc",
+      wdir >= 45 & wdir < 135 ~ "Wschod",
+      wdir >= 135 & wdir < 225 ~ "Poludnie",
+      wdir >= 225 & wdir < 315 ~ "Zachod"
+    ),
+    wdir_cat = factor(wdir_cat)
   )
 
 # Ustawienie ATL (Atlanta) jako punktu odniesienia
@@ -76,17 +85,17 @@ print(paste("Liczba wierszy dla 50 lotnisk:", nrow(data_class_full)))
 ```
 Model Ordered Logit
 ```{r}
-# BLOK 1: Pogoda
-m1 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp, data = data_class_full, Hess = TRUE)
+# BLOK 1: Pogoda (Zaktualizowana o śnieg i kierunek wiatru)
+m1 <- polr(Delay_Group_ord ~ wspd + wdir_cat + pres + tavg + prcp + snow, data = data_class_full, Hess = TRUE)
 
 # BLOK 2: Pogoda + 50 Lotnisk
-m2 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp + Dep_Airport, data = data_class_full, Hess = TRUE)
+m2 <- polr(Delay_Group_ord ~ wspd + wdir_cat + pres + tavg + prcp + snow + Dep_Airport, data = data_class_full, Hess = TRUE)
 
 # BLOK 3: Pogoda + 50 Lotnisk + Czas
-m3 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp + Dep_Airport + Month + DepTime_label, data = data_class_full, Hess = TRUE)
+m3 <- polr(Delay_Group_ord ~ wspd + wdir_cat + pres + tavg + prcp + snow + Dep_Airport + Month + DepTime_label, data = data_class_full, Hess = TRUE)
 
 # BLOK 4: Pełny model
-m4 <- polr(Delay_Group_ord ~ wspd + pres + tavg + prcp + Dep_Airport + Month + DepTime_label + Airline, data = data_class_full, Hess = TRUE)
+m4 <- polr(Delay_Group_ord ~ wspd + wdir_cat + pres + tavg + prcp + snow + Dep_Airport + Month + DepTime_label + Airline, data = data_class_full, Hess = TRUE)
 
 # Porównanie kryterium AIC
 print("Porównanie modeli (Kryterium AIC)")
@@ -117,5 +126,47 @@ wyniki_m4 <- tidy(m4) %>%
 
 write_csv(wyniki_m4, "Tabela_Wynikow_Model_Ordered_Logit_50_lotnisk.csv")
 print("Zakończono eksport wyników dla 50 lotnisk.")
+```
+
+Test Branta
+```{r}
+library(brant)
+
+wynik_brant <- brant(m4)
+
+print(wynik_brant)
+
+brant_df <- as.data.frame(wynik_brant) %>%
+  rownames_to_column(var = "Zmienna")
+
+write_csv(brant_df, "Tabela_Wynikow_Test_Branta.csv")
+print("Zapisano plik: Tabela_Wynikow_Test_Branta.csv")
+```
+
+
+Macierz pomyłek 
+
+```{r}
+predykcje_m4 <- predict(m4, type = "class")
+macierz_wynikow <- confusionMatrix(data = predykcje_m4, 
+                                   reference = data_class_full$Delay_Group_ord)
+
+print("--- MACIERZ POMYŁEK ---")
+print(macierz_wynikow$table)
+
+print("--- OGÓLNA TRAFNOŚĆ (ACCURACY) ---")
+print(round(macierz_wynikow$overall["Accuracy"], 4))
+
+print("--- SZCZEGÓŁOWE METRYKI DLA KLAS ---")
+print(round(macierz_wynikow$byClass[, c("Sensitivity", "Specificity", "Precision", "Recall", "F1")], 4))
+
+metryki_df <- as.data.frame(macierz_wynikow$byClass) %>%
+  rownames_to_column(var = "Kategoria") %>%
+  dplyr::select(Kategoria, Sensitivity, Specificity, Precision, Recall, F1) %>%
+  mutate(Kategoria = str_replace(Kategoria, "Class: ", ""))
+
+write_csv(metryki_df, "Tabela_Metryki_Klasyfikacji_m4.csv")
+print("Zapisano plik: Tabela_Metryki_Klasyfikacji_m4.csv")
+  
 ```
 
